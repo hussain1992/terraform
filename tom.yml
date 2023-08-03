@@ -1,0 +1,30 @@
+---
+- name: Install tomcat server
+  hosts: all
+  become: true
+
+  tasks:
+  - name: Install Java
+    yum:
+      name: java
+      state: latest
+
+  - name: download tomcat server packages
+    get_url:
+       url: https://mirrors.estointernet.in/apache/tomcat/tomcat-8/v8.5.54/bin/apache-tomcat-8.5.54.tar.gz
+       dest: /usr/local
+
+  - name: extract tomcat packages
+    unarchive:
+       src: /usr/local/apache-tomcat-8.5.54.tar.gz
+       dest: /usr/local
+       remote_src: yes
+
+  - name: start tomcat services
+    shell: nohup /usr/local/apache-tomcat-8.5.54/bin/startup.sh
+
+  - name: copy
+    copy:
+       src: /home/centos/JavaWebCalculator/target/WebAppCal.war
+       dest: /usr/local/apache-tomcat-8.5.54/webapps
+
