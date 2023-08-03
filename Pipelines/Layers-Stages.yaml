@@ -1,0 +1,316 @@
+parameters:
+  - name: environment
+    type: string
+    displayName: "The name of the environment (ex. dev, prod )"
+
+  - name: layers
+    type: object
+    displayName: "A layer object"
+
+  - name: getImageLayers
+    type: string
+    default: ""
+    displayName: "Retrieve an Image ID"
+
+  - name: pipelineId
+    type: string
+    default: ""
+    displayName: "The Azure DevOps Pipeline ID"
+
+  - name: runId
+    type: string
+    default: ""
+    displayName: "The build from which to download the artifacts"
+
+  - name: preferTriggeringPipeline
+    type: string
+    default: ""
+    displayName: "A boolean specifying whether to download artifacts from a triggering build."
+
+  - name: downloadPath
+    type: string
+    default: ""
+    displayName: "Directory to download the artifact files. Can be relative to the pipeline workspace directory or absolute. If multi-download option is applied (by leaving an empty artifact name), a sub-directory will be created for each."
+
+  - name: targetFolder
+    type: string
+    default: ""
+    displayName: "Target folder or UNC path files will copy to"
+
+  - name: projectName
+    type: string
+    default: ""
+    displayName: "The name of the Azure DevOps project"
+
+  - name: runBranch
+    type: string
+    default: ""
+    displayName: "Specify to filter on branch/ref name"
+
+  - name: runVersion
+    type: string
+    default: ""
+    displayName: "Specifies which build version to download. Options: latest, latestFromBranch, specific"
+
+  - name: terraformDebug
+    type: boolean
+    displayName: "Specifies whether Terraform Debug is enabled. True/False"
+
+  - name: outputPlanToFile
+    type: string
+    default: "true"
+    displayName: "Specifies whether to export the terraform plan to a pipeline artiact. True/False"
+
+stages:
+  # Create a stage for each layer's apply process.  Set dependsOn for all dependencies listed  in each nested object in parameters.layers.
+  # This first dependency loop constructs the pipeline map and does not take Terraform into consideration
+
+  - ${{ each layer in parameters.layers }}:
+      - stage: ${{ layer.name }}_${{ parameters.environment}}_plan
+        displayName: ${{ layer.name }} - ${{ parameters.environment }} - Plan
+        condition: and(not(failed()), eq('${{ layer.skip }}', false))
+        dependsOn:
+          - ${{ each dependency in layer.dependencies }}:
+              - ${{ dependency.key }}_${{ parameters.environment}}_apply
+        variables:
+          - template: ./Variables.${{ parameters.environment }}.yaml
+
+        # Download the universal package for the layer and the version
+
+        jobs:
+          - job: ${{ layer.name }}_start
+            displayName: ${{ layer.name }} Start
+            steps:
+              - bash: echo This exists to have a non-dynamic job in the stage without dependencies
+
+          - ${{ if contains( layer.skip, false) }}:
+              - job: ${{ layer.name }}
+                condition: eq(${{ layer.skipPlan }}, false)
+                displayName: ${{ layer.name }} Plan
+                steps:
+                  - task: UniversalPackages@0
+                    displayName: ${{ layer.type }} artifact
+                    condition: and(not(failed()), eq('${{ layer.terraform_registry }}', false))
+                    inputs:
+                      command: "download"
+                      downloadDirectory: "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}"
+                      feedsToUse: "external"
+                      externalFeedCredentials: $(artifactFeedCredentials)
+                      feedDownloadExternal: $(artifactFeed)
+                      packageDownloadExternal: layer-${{ layer.type }}
+                      versionDownloadExternal: ${{ layer.version }}
+
+                  # Create a container for Terraform state.  terraformsetup.sh is packaged with the layer build process, but exists in Stratum/scripts.sh
+
+                  - task: AzureCLI@2
+                    displayName: State Setup ${{ layer.name }}
+                    inputs:
+                      azureSubscription: ${{ variables.serviceConnectionApp }}
+                      addSpnToEnvironment: true
+                      scriptType: bash
+                      scriptLocation: scriptPath
+                      scriptPath: "$(kitPath)/Scripts/${{ layer.provider }}setup.sh"
+                      arguments: layerName=${{ layer.name }} environment=${{ parameters.environment }} backendResourceGroupName=$(backendResourceGroupName) backendStorageAccountName=$(backendStorageAccountName) backendContainerName=$(backendContainerName) buildRepositoryName=$(Build.Repository.Name) basedOnStratumKitName=$(basedOnStratumKitName) layerType=${{ layer.type }} layerDestroy=${{ layer.destroy }} kitPath=$(kitPath) provider=${{ layer.provider }} useMsi=$(useMsi) inputFile=${{ layer.inputFile }}  providerPath=${{ layer.providerPath }}
+
+                  # Conditional Image Builder connection if IB is enabled
+
+                  - ${{ if contains( parameters.getImageLayers, layer.name) }}:
+                      - template: ./GetImage.yaml
+                        parameters:
+                          projectName: ${{ parameters.projectName }}
+                          runVersion: ${{ parameters.runVersion }}
+                          runBranch: ${{ parameters.runBranch }}
+                          pipelineId: ${{ parameters.pipelineId }}
+                          runId: ${{ parameters.runId }}
+                          preferTriggeringPipeline: ${{ parameters.preferTriggeringPipeline }}
+                          downloadPath: ${{ parameters.downloadPath }}
+                          layerType: ${{ layer.type }}
+
+                  - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+                    displayName: "Replace tokens in **/*.tfvars, **/*.tf, **/*.sh, **/*.ps1"
+                    inputs:
+                      rootDirectory: "$(System.DefaultWorkingDirectory)"
+                      targetFiles: "**/*.tfvars, **/*.tf, **/*.sh, **/*.ps1"
+                      tokenPrefix: "[__"
+                      tokenSuffix: "__]"
+                      verbosity: 'off'
+
+                  # Login to Terraform registry if layer.terraform_registry is "true"
+
+                  - task: AzureCLI@2
+                    displayName: Registry Login ${{ layer.name }}
+                    condition: and(not(failed()), eq('${{ layer.terraform_registry }}', true))
+                    inputs:
+                      azureSubscription: ${{ variables.serviceConnectionApp }}
+                      addSpnToEnvironment: true
+                      scriptType: bash
+                      scriptLocation: scriptPath
+                      scriptPath: "$(kitPath)/Scripts/terraformlogin.sh"
+                      arguments: layerName=${{ layer.name }} environment=${{ parameters.environment }} backendResourceGroupName=$(backendResourceGroupName) backendStorageAccountName=$(backendStorageAccountName) backendContainerName=$(backendContainerName) buildRepositoryName=$(Build.Repository.Name) basedOnStratumKitName=$(basedOnStratumKitName) layerType=${{ layer.type }} layerDestroy=${{ layer.destroy }} kitPath=$(kitPath) provider=${{ layer.provider }} useMsi=$(useMsi) inputFile=${{ layer.inputFile }}  providerPath=${{ layer.providerPath }}
+                  
+                  # Create working directory if layer.terraform_registry is "true"
+                  
+                  - script: |                   
+                      mkdir "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}"
+                    name: tfregistry_working_directory
+                    displayName: Setup TF Registry working directory
+                    condition: and(not(failed()), eq('${{ layer.terraform_registry }}', true))
+
+                  # Terraform plan. terraformplan.sh is packaged with the layer build process, but exists in Stratum/scripts.sh
+
+                  - task: AzureCLI@2
+                    name: planning_${{ layer.name }}
+                    displayName: Planning ${{ layer.name }}
+                    env: 
+                      TF_LOG: $(terraformDebugType)
+                      TF_LOG_PATH: "$(Build.ArtifactStagingDirectory)/tf_debug_plan"
+                    inputs:
+                      azureSubscription: ${{ variables.serviceConnectionApp }}
+                      addSpnToEnvironment: true
+                      scriptType: bash
+                      scriptLocation: scriptPath
+                      scriptPath: "$(kitPath)/Scripts/${{ layer.provider }}plan.sh"
+                      arguments: layerName=${{ layer.name }} environment=${{ parameters.environment }} backendResourceGroupName=$(backendResourceGroupName) backendStorageAccountName=$(backendStorageAccountName) backendContainerName=$(backendContainerName) buildRepositoryName=$(Build.Repository.Name) basedOnStratumKitName=$(basedOnStratumKitName) layerType=${{ layer.type }} layerDestroy=${{ layer.destroy }} kitPath=$(kitPath) provider=${{ layer.provider }} useMsi=$(useMsi) inputFile=${{ layer.inputFile }} outputPlanToFile=$(outputPlanToFile) providerPath=${{ layer.providerPath }}
+
+                  # Output Terraform Plan as a Pipeline Artifact
+
+                  - task: PublishPipelineArtifact@1
+                    displayName: Publish Terraform Plan Output to Pipeline Artifact
+                    condition: eq(${{ parameters.outputPlanToFile }}, true)
+                    inputs: 
+                      path: "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}/${{layer.name}}-${{parameters.environment}}-plan.txt"
+                      artifactName: "${{ layer.name }}-${{ parameters.environment }}-plan"
+
+                  # Publish Terraform Debug log to Artifact for crash debugging
+
+                  - task: PublishPipelineArtifact@1
+                    displayName: Publish Terraform Debug Artifact
+                    condition: eq(${{ parameters.terraformDebug }}, true)
+                    inputs:
+                      path: "$(Build.ArtifactStagingDirectory)/tf_debug_plan"
+                      artifactName: "${{ layer.name }}-${{ parameters.environment }}-plan-debug"
+
+      # Create a stage for each layer's apply process
+
+      - stage: ${{ layer.name }}_${{ parameters.environment}}_apply
+        displayName: ${{ layer.name }} - ${{ parameters.environment }} - Apply
+        dependsOn: ${{ layer.name }}_${{ parameters.environment}}_plan
+        condition: and(succeeded('${{ layer.name }}_${{ parameters.environment}}_plan'), eq('${{ layer.skip }}', false))
+        variables:
+          - template: ./Variables.${{ parameters.environment }}.yaml
+        jobs:
+          - job: ${{ layer.name }}_start
+            displayName: ${{ layer.name }} Start
+            steps:
+              - bash: echo This exists to have a non-dynamic job in the stage without dependencies
+          
+          # Check previous stage's output and determine if Terraform apply should be skipped
+
+          - ${{ if contains( layer.skip, false) }}:
+              - job: apply_skip_detection
+                displayName: "Apply skip detection"
+                variables:
+                    skipApply: $[stageDependencies.${{ layer.name }}_${{ parameters.environment}}_plan.${{ layer.name }}.outputs['planning_${{ layer.name }}.${{ layer.name }}-skipApply']]
+                steps:
+                  - script: |                   
+                      echo "##vso[task.setvariable variable=skipApply;isOutput=true]$(skipApply)"
+                      echo "Detailed value detailedExitCode:" $(skipApply)
+                    name: skipresult
+                    displayName: Skip Detection Result
+
+          # Terraform Apply is a deployment job to enable use of environments.  The condition is the result True/False from the TF plan's artifact
+          # If Terraform plan did not detect changes, this iteration stops.
+
+          - ${{ if contains( layer.skip, false) }}:
+              - deployment: ${{ layer.name }}
+                displayName: ${{ layer.name }} Apply
+                environment: ${{ parameters.environment }}
+                dependsOn: 
+                  - apply_skip_detection
+                # if skipApply = false and skipPlan = false OR if skipApply = false, or skipPlan = true
+                condition: or(and(eq(dependencies.apply_skip_detection.outputs['skipresult.skipApply'], 'False'), eq('${{ layer.skipPlan }}', false)), eq('${{ layer.skipPlan }}', true), eq(dependencies.apply_skip_detection.outputs['skipresult.skipApply'], 'False'))
+                workspace:
+                  clean: all
+                strategy:
+                  runOnce:
+                    deploy:
+                      steps:
+                        - checkout: self
+
+                        # Download the universal package for the layer and the version
+
+                        - task: UniversalPackages@0
+                          displayName: ${{ layer.type }} artifact
+                          condition: and(not(failed()), eq('${{ layer.terraform_registry }}', false))
+                          inputs:
+                            command: "download"
+                            downloadDirectory: "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}"
+                            feedsToUse: "external"
+                            externalFeedCredentials: $(artifactFeedCredentials)
+                            feedDownloadExternal: $(artifactFeed)
+                            packageDownloadExternal: layer-${{ layer.type }}
+                            versionDownloadExternal: ${{ layer.version }}
+
+                        - ${{ if contains( parameters.getImageLayers, layer.name) }}:
+                            - template: ./GetImage.yaml
+                              parameters:
+                                projectName: ${{ parameters.projectName }}
+                                runVersion: ${{ parameters.runVersion }}
+                                runBranch: ${{ parameters.runBranch }}
+                                pipelineId: ${{ parameters.pipelineId }}
+                                runId: ${{ parameters.runId }}
+                                preferTriggeringPipeline: ${{ parameters.preferTriggeringPipeline }}
+                                downloadPath: ${{ parameters.downloadPath }}
+                                layerType: ${{ layer.type }}
+
+                        - task: qetza.replacetokens.replacetokens-task.replacetokens@3
+                          displayName: "Replace tokens in **/*.tfvars, **/*.tf, **/*.sh, **/*.ps1"
+                          inputs:
+                            rootDirectory: "$(System.DefaultWorkingDirectory)"
+                            targetFiles: "**/*.tfvars, **/*.tf, **/*.sh, **/*.ps1"
+                            tokenPrefix: "[__"
+                            tokenSuffix: "__]"
+                            verbosity: 'off'
+
+                        # Login to Terraform registry if layer.terraform_registry is "true"
+
+                        - task: AzureCLI@2
+                          displayName: Registry Login ${{ layer.name }}
+                          condition: and(not(failed()), eq('${{ layer.terraform_registry }}', true))
+                          inputs:
+                            azureSubscription: ${{ variables.serviceConnectionApp }}
+                            addSpnToEnvironment: true
+                            scriptType: bash
+                            scriptLocation: scriptPath
+                            scriptPath: "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}/terraformlogin.sh"
+                            arguments: layerName=${{ layer.name }} environment=${{ parameters.environment }} backendResourceGroupName=$(backendResourceGroupName) backendStorageAccountName=$(backendStorageAccountName) backendContainerName=$(backendContainerName) buildRepositoryName=$(Build.Repository.Name) basedOnStratumKitName=$(basedOnStratumKitName) layerType=${{ layer.type }} layerDestroy=${{ layer.destroy }} kitPath=$(kitPath) provider=${{ layer.provider }} useMsi=$(useMsi) inputFile=${{ layer.inputFile }}  providerPath=${{ layer.providerPath }}
+
+                        # Create working directory if layer.terraform_registry is "true"
+                        
+                        - script: |                   
+                            mkdir "$(System.DefaultWorkingDirectory)/layer-${{ layer.type }}"
+                          name: tfregistry_working_directory
+                          displayName: Setup TF Registry working directory
+                          condition: and(not(failed()), eq('${{ layer.terraform_registry }}', true))
+
+                        # Terraform apply. terraformapply.sh is packaged with the layer build process, but exists in Stratum/scripts.sh
+
+                        - task: AzureCLI@2
+                          displayName: Applying ${{ layer.name }}
+                          env: 
+                            TF_LOG: $(terraformDebugType)
+                            TF_LOG_PATH: "$(Build.ArtifactStagingDirectory)/tf_debug_apply"
+                          inputs:
+                            azureSubscription: ${{ variables.serviceConnectionApp }}
+                            addSpnToEnvironment: true
+                            scriptType: bash
+                            scriptLocation: scriptPath
+                            scriptPath: "$(kitPath)/Scripts/${{ layer.provider }}apply.sh"
+                            arguments: layerName=${{ layer.name }} environment=${{ parameters.environment }} backendResourceGroupName=$(backendResourceGroupName) backendStorageAccountName=$(backendStorageAccountName) backendContainerName=$(backendContainerName) buildRepositoryName=$(Build.Repository.Name) basedOnStratumKitName=$(basedOnStratumKitName) layerType=${{ layer.type }} layerDestroy=${{ layer.destroy }} kitPath=$(kitPath) provider=${{ layer.provider }} useMsi=$(useMsi) inputFile=${{ layer.inputFile }}  providerPath=${{ layer.providerPath }}
+
+                        - task: PublishPipelineArtifact@1
+                          displayName: Publish Terraform Debug Artifact
+                          condition: eq(${{ parameters.terraformDebug }}, true)
+                          inputs:
+                            path: "$(Build.ArtifactStagingDirectory)/tf_debug_apply"
+                            artifactName: "${{ layer.name }}-${{ parameters.environment }}-apply-debug"

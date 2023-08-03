@@ -1,0 +1,246 @@
+trigger:
+  branches:
+    include:
+      - users/*
+  paths:
+    include:
+      - /kits/jumpstart-appservice/*
+    exclude:
+      - /**/*.md
+      - /secret/*.*
+      - /.attachments
+
+variables:
+  - template: Variables.yaml
+
+pool: $(agent_pool)
+
+stages:
+  - template: ./Layers-${{ variables.JobsOrStages }}.yaml
+    parameters:
+      environment: dev
+      terraformDebug: ${{ variables.terraformDebug}}
+      outputPlanToFile: ${{ variables.outputPlanToFile }}
+      layers:
+        - name: resourcegroup
+          type: resourcegroup
+          version: "6.0.0"
+          skip: false # Skip entire layer run
+          skipPlan: false # Skip plan only
+          provider: terraform
+          #providerPath: '/usr/local/bin/terraform-012' # Optional provide different path for Terraform binary.  ie: run this layer as TF 14, the rest as 1.0
+          #inputFile: myfile.tf # Optional provide an additional file of any type to be copied into the runtime directory of the layer
+          terraform_registry: false
+          destroy: false
+
+        - name: networking
+          type: networking
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            resourcegroup: resourcegroup
+
+        - name: networksecuritygroup
+          type: networksecuritygroup
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            networking: networking
+
+        - name: keyvault
+          type: keyvault
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            resourcegroup: resourcegroup
+
+        - name: adoprivateendpoints
+          type: privateendpoints
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            keyvault: keyvault
+            adoprivatednszone: privatednszone
+
+        - name: adoappserviceprivateendpoints
+          type: privateendpoints
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            appservice: appservice
+
+        - name: loganalytics
+          type: loganalytics
+          version: "6.1.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            keyvault: keyvault
+
+        - name: loganalytics_solution
+          type: loganalytics_solution
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            loganalytics: loganalytics
+
+        - name: storage
+          type: storage
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            keyvault: keyvault
+            adoprivateendpoints: privateendpoints
+
+        - name: azsql
+          type: azsql
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            keyvault: keyvault
+            storage: storage
+
+        - name: privateendpoints
+          type: privateendpoints
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            networking: networking
+            keyvault: keyvault
+            storage: storage
+            azsql: azsql
+            appservice: appservice
+            privatednszone: privatednszone
+
+        - name: azmonitor_privatelink_scope
+          type: azmonitor_privatelink_scope
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            loganalytics: loganalytics
+
+        - name: privatednszone
+          type: privatednszone
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            networking: networking
+
+        - name: adoprivatednszone
+          type: privatednszone
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            networking: networking
+
+        - name: privatednsrecords
+          type: privatednsrecords
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            privatednszone: privatednszone
+            privateendpoints: privateendpoints
+
+        - name: applicationinsights
+          type: applicationinsights
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            resourcegroup: resourcegroup
+
+        - name: appservice
+          type: appservice
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            storage: storage
+            keyvault: keyvault
+            applicationinsights: applicationinsights
+
+        - name: appservice_slots_swap
+          type: appservice_slots_swap
+          version: "6.0.0"
+          skip: true
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            appservice: appservice
+
+        - name: diagnosticlogs
+          type: diagnosticlogs
+          version: "6.0.0"
+          skip: false
+          skipPlan: false
+          provider: terraform
+          terraform_registry: false
+          destroy: false
+          dependencies:
+            storage: storage
+            loganalytics: loganalytics
+            keyvault: keyvault
+            azsql: azsql
+            appservice: appservice

@@ -1,0 +1,32 @@
+variables:
+  - name: motsId
+    value: msft                       # <--- CHANGE TO APPLICATION MOTSID
+                                      # ex,.. value: 22589
+  - name: appAcronym
+    value: asj06                        # <--- CHANGE TO APPLICATION AppAcronym. the value sould between 3-5 letters and starts with a alphacharacter
+                                      # <---- Ex values,.. icap, paf, Nva, macd, ctmb etc,. --- > value: icap
+  - name: agent_pool                  
+    value: msftdev-agents               # <--- CHANGE TO ADO agents pool name
+  - name: basedOnStratumKitName       
+    value: jumpstart-appservice        # Only needed when running kit from Stratum
+  - name: artifactFeedCredentials      # PAT based service connection to Azure Artifacts feed
+    value: "ACC-Azure-00 Stratum Feed" # <--- verify Stratum Azure repo feed service connection
+  - name: artifactFeed
+    value: "Stratum"
+  - name: kitPath
+    value: "./kits/jumpstart-appservice"
+  - name: useMsi
+    value: "true"                      # Be sure and set this to "false" if using SPN!
+  - name: JobsOrStages # case sensitive
+    value: Stages
+  - name: skipPlan
+    value: "true"
+
+  # Output Plan to File creates a pipeline artifact of the plan for review by the user
+  - name: outputPlanToFile
+    value: "false"
+  - name: terraformDebug
+    value: false
+  - name: terraformDebugType
+    value: "TRACE"
+      
